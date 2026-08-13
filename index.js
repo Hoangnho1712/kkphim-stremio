@@ -3,74 +3,73 @@ const fetch = require('node-fetch');
 
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '2.0.0',
+  version: '3.1.0',
   name: 'KKPhim Của Tôi',
-  description: 'Kho phim KKPhim đầy đủ thể loại & tìm kiếm',
+  description: 'Tích hợp KKPhim vào Cinemeta / TMDB (Phim Lẻ & Phim Bộ)',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
+  idPrefixes: ['tt', 'kkphim_'],
   catalogs: [
     {
       type: 'movie',
       id: 'kk_phim_le',
       name: 'KKPhim - Phim Lẻ',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     },
     {
       type: 'series',
       id: 'kk_phim_bo',
       name: 'KKPhim - Phim Bộ',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     },
     {
       type: 'series',
       id: 'kk_hoat_hinh',
       name: 'KKPhim - Hoạt Hình',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     },
     {
       type: 'series',
       id: 'kk_tv_shows',
       name: 'KKPhim - TV Shows',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
     }
-  ],
-  idPrefixes: ['kkphim_']
+  ]
 };
 
 const builder = new addonBuilder(manifest);
 
-// 1. Lấy danh sách phim theo danh mục hoặc Tìm kiếm
+// 1. Catalog Handler (Hiện đủ 4 danh mục & hỗ trợ cuộn xem thêm)
 builder.defineCatalogHandler(async (args) => {
   let url = '';
+  const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
+  const limit = 24;
+  const page = Math.floor(skip / limit) + 1;
 
-  // Trường hợp Tìm kiếm phim
   if (args.extra && args.extra.search) {
     const keyword = encodeURIComponent(args.extra.search);
-    url = `https://phimapi.com/v1/api/tim-kiem?keyword=${keyword}&limit=24`;
+    url = `https://phimapi.com/v1/api/tim-kiem?keyword=${keyword}&limit=${limit}&page=${page}`;
   } else {
-    // Phân loại danh mục
-    let categoryMap = {
+    const categoryMap = {
       'kk_phim_le': 'phim-le',
       'kk_phim_bo': 'phim-bo',
       'kk_hoat_hinh': 'hoat-hinh',
       'kk_tv_shows': 'tv-shows'
     };
-    let slug = categoryMap[args.id] || 'phim-le';
-    url = `https://phimapi.com/v1/api/danh-sach/${slug}?limit=24&page=1`;
+    const slug = categoryMap[args.id] || 'phim-le';
+    url = `https://phimapi.com/v1/api/danh-sach/${slug}?limit=${limit}&page=${page}`;
   }
 
   try {
     const res = await fetch(url);
     const data = await res.json();
-    let items = data.data ? data.data.items : (data.items || []);
+    const items = data.data ? data.data.items : (data.items || []);
 
     const metas = items.map(m => {
-      // Đảm bảo lấy đúng link ảnh poster từ API
       let posterUrl = m.poster_url;
       if (posterUrl && !posterUrl.startsWith('http')) {
         posterUrl = `https://phimimg.com/${posterUrl}`;
       }
-
       return {
         id: `kkphim_${m.slug}`,
         type: args.type,
@@ -82,13 +81,14 @@ builder.defineCatalogHandler(async (args) => {
 
     return { metas };
   } catch (e) {
-    console.error('Catalog Error:', e);
     return { metas: [] };
   }
 });
 
-// 2. Chi tiết phim
+// 2. Meta Handler
 builder.defineMetaHandler(async (args) => {
+  if (!args.id.startsWith('kkphim_')) return { meta: {} };
+  
   const slug = args.id.replace('kkphim_', '');
   try {
     const res = await fetch(`https://phimapi.com/phim/${slug}`);
@@ -112,9 +112,47 @@ builder.defineMetaHandler(async (args) => {
   }
 });
 
-// 3. Link nguồn phim (Stream m3u8)
+// 3. Stream Handler (Hỗ trợ ghép link cả Phim Lẻ lẫn Phim Bộ IMDb)
 builder.defineStreamHandler(async (args) => {
-  const slug = args.id.replace('kkphim_', '');
+  let slug = '';
+  let targetEpisode = null;
+
+  // Xử lý ID từ IMDb (ví dụ Phim bộ: tt1234567:1:5 hoặc Phim lẻ: tt0371746)
+  if (args.id.startsWith('tt')) {
+    try {
+      const parts = args.id.split(':');
+      const imdbId = parts[0];
+      if (parts.length > 2) {
+        targetEpisode = parts[2]; // Lấy số tập
+      }
+
+      // Lấy tên phim từ Cinemeta
+      const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${args.type}/${imdbId}.json`);
+      const metaData = await metaRes.json();
+      
+      if (!metaData || !metaData.meta || !metaData.meta.name) return { streams: [] };
+      
+      const title = metaData.meta.name;
+
+      // Tìm tên phim trên KKPhim
+      const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=1`);
+      const searchData = await searchRes.json();
+
+      if (searchData.data && searchData.data.items && searchData.data.items.length > 0) {
+        slug = searchData.data.items[0].slug;
+      } else {
+        return { streams: [] };
+      }
+    } catch (e) {
+      return { streams: [] };
+    }
+  } else if (args.id.startsWith('kkphim_')) {
+    slug = args.id.replace('kkphim_', '');
+  }
+
+  if (!slug) return { streams: [] };
+
+  // Lấy danh sách link xem phim M3U8 từ KKPhim
   try {
     const res = await fetch(`https://phimapi.com/phim/${slug}`);
     const data = await res.json();
@@ -123,9 +161,18 @@ builder.defineStreamHandler(async (args) => {
     if (data.episodes) {
       data.episodes.forEach(server => {
         server.server_data.forEach(ep => {
-          if (ep.link_m3u8) {
+          let isMatch = true;
+
+          // Nếu là Phim Bộ (có số tập targetEpisode) -> Lọc đúng tập đó
+          if (targetEpisode) {
+            // Loại bỏ chữ, chỉ lấy số từ tên tập (ví dụ "Tập 05" -> "5")
+            const epNumber = ep.name.replace(/\D/g, '');
+            isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`));
+          }
+
+          if (isMatch && ep.link_m3u8) {
             streams.push({
-              title: `${server.server_name} - ${ep.name}`,
+              title: `[KKPhim] ${server.server_name} - ${ep.name}`,
               url: ep.link_m3u8
             });
           }
