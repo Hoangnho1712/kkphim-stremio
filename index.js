@@ -3,9 +3,9 @@ const fetch = require('node-fetch');
 
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'KKPhim Của Tôi',
-  description: 'Kho phim KKPhim đầy đủ thể loại & tìm kiếm',
+  description: 'Kho phim KKPhim đầy đủ - Cuộn trang không giới hạn',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   catalogs: [
@@ -13,25 +13,37 @@ const manifest = {
       type: 'movie',
       id: 'kk_phim_le',
       name: 'KKPhim - Phim Lẻ',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     },
     {
       type: 'series',
       id: 'kk_phim_bo',
       name: 'KKPhim - Phim Bộ',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     },
     {
       type: 'series',
       id: 'kk_hoat_hinh',
       name: 'KKPhim - Hoạt Hình',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     },
     {
       type: 'series',
       id: 'kk_tv_shows',
       name: 'KKPhim - TV Shows',
-      extra: [{ name: 'search', isRequired: false }]
+      extra: [
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
     }
   ],
   idPrefixes: ['kkphim_']
@@ -39,33 +51,36 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// 1. Lấy danh sách phim theo danh mục hoặc Tìm kiếm
+// 1. Xử lý danh sách phim + Phân trang (Cuộn xem thêm)
 builder.defineCatalogHandler(async (args) => {
   let url = '';
+  // Tính toán số trang dựa trên số lượng phim đã bỏ qua (skip)
+  const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
+  const limit = 24;
+  const page = Math.floor(skip / limit) + 1;
 
-  // Trường hợp Tìm kiếm phim
+  // Nếu người dùng gõ Tìm kiếm
   if (args.extra && args.extra.search) {
     const keyword = encodeURIComponent(args.extra.search);
-    url = `https://phimapi.com/v1/api/tim-kiem?keyword=${keyword}&limit=24`;
+    url = `https://phimapi.com/v1/api/tim-kiem?keyword=${keyword}&limit=${limit}&page=${page}`;
   } else {
     // Phân loại danh mục
-    let categoryMap = {
+    const categoryMap = {
       'kk_phim_le': 'phim-le',
       'kk_phim_bo': 'phim-bo',
       'kk_hoat_hinh': 'hoat-hinh',
       'kk_tv_shows': 'tv-shows'
     };
-    let slug = categoryMap[args.id] || 'phim-le';
-    url = `https://phimapi.com/v1/api/danh-sach/${slug}?limit=24&page=1`;
+    const slug = categoryMap[args.id] || 'phim-le';
+    url = `https://phimapi.com/v1/api/danh-sach/${slug}?limit=${limit}&page=${page}`;
   }
 
   try {
     const res = await fetch(url);
     const data = await res.json();
-    let items = data.data ? data.data.items : (data.items || []);
+    const items = data.data ? data.data.items : (data.items || []);
 
     const metas = items.map(m => {
-      // Đảm bảo lấy đúng link ảnh poster từ API
       let posterUrl = m.poster_url;
       if (posterUrl && !posterUrl.startsWith('http')) {
         posterUrl = `https://phimimg.com/${posterUrl}`;
@@ -112,7 +127,7 @@ builder.defineMetaHandler(async (args) => {
   }
 });
 
-// 3. Link nguồn phim (Stream m3u8)
+// 3. Link xem phim (Stream m3u8)
 builder.defineStreamHandler(async (args) => {
   const slug = args.id.replace('kkphim_', '');
   try {
