@@ -3,9 +3,9 @@ const fetch = require('node-fetch');
 
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '3.1.0',
+  version: '3.2.0',
   name: 'KKPhim Của Tôi',
-  description: 'Tích hợp KKPhim vào Cinemeta / TMDB (Phim Lẻ & Phim Bộ)',
+  description: 'Tích hợp KKPhim - Hỗ trợ tìm Phim Bộ thông minh',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tt', 'kkphim_'],
@@ -39,7 +39,7 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// 1. Catalog Handler (Hiện đủ 4 danh mục & hỗ trợ cuộn xem thêm)
+// 1. Catalog Handler
 builder.defineCatalogHandler(async (args) => {
   let url = '';
   const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
@@ -112,12 +112,24 @@ builder.defineMetaHandler(async (args) => {
   }
 });
 
-// 3. Stream Handler (Hỗ trợ ghép link cả Phim Lẻ lẫn Phim Bộ IMDb)
+// Hàm hỗ trợ tìm kiếm phim trên KKPhim
+async function searchKKPhim(query) {
+  if (!query) return null;
+  try {
+    const res = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(query)}&limit=5`);
+    const data = await res.json();
+    if (data.data && data.data.items && data.data.items.length > 0) {
+      return data.data.items[0].slug;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 3. Stream Handler (Khớp thông minh cho Phim Bộ)
 builder.defineStreamHandler(async (args) => {
   let slug = '';
   let targetEpisode = null;
 
-  // Xử lý ID từ IMDb (ví dụ Phim bộ: tt1234567:1:5 hoặc Phim lẻ: tt0371746)
   if (args.id.startsWith('tt')) {
     try {
       const parts = args.id.split(':');
@@ -126,22 +138,20 @@ builder.defineStreamHandler(async (args) => {
         targetEpisode = parts[2]; // Lấy số tập
       }
 
-      // Lấy tên phim từ Cinemeta
+      // Lấy thông tin phim từ Cinemeta
       const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${args.type}/${imdbId}.json`);
       const metaData = await metaRes.json();
       
-      if (!metaData || !metaData.meta || !metaData.meta.name) return { streams: [] };
-      
-      const title = metaData.meta.name;
+      if (metaData && metaData.meta) {
+        const title = metaData.meta.name;
+        // Thử tìm theo Tên gốc Tiếng Anh
+        slug = await searchKKPhim(title);
 
-      // Tìm tên phim trên KKPhim
-      const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=1`);
-      const searchData = await searchRes.json();
-
-      if (searchData.data && searchData.data.items && searchData.data.items.length > 0) {
-        slug = searchData.data.items[0].slug;
-      } else {
-        return { streams: [] };
+        // Nếu không ra, thử làm sạch tên (xóa ký tự đặc biệt) rồi tìm lại
+        if (!slug) {
+          const cleanTitle = title.replace(/[^a-zA-10-9 ]/g, "").trim();
+          slug = await searchKKPhim(cleanTitle);
+        }
       }
     } catch (e) {
       return { streams: [] };
@@ -163,11 +173,11 @@ builder.defineStreamHandler(async (args) => {
         server.server_data.forEach(ep => {
           let isMatch = true;
 
-          // Nếu là Phim Bộ (có số tập targetEpisode) -> Lọc đúng tập đó
+          // Xử lý lọc tập cho Phim Bộ
           if (targetEpisode) {
-            // Loại bỏ chữ, chỉ lấy số từ tên tập (ví dụ "Tập 05" -> "5")
             const epNumber = ep.name.replace(/\D/g, '');
-            isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`));
+            // Khớp nếu cùng số tập hoặc slug chứa tap-X
+            isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`) || ep.name == targetEpisode);
           }
 
           if (isMatch && ep.link_m3u8) {
