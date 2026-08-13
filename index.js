@@ -3,7 +3,7 @@ const fetch = require('node-fetch');
 
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '3.1.0',
+  version: '3.1.1',
   name: 'KKPhim Của Tôi',
   description: 'Tích hợp KKPhim vào Cinemeta / TMDB (Phim Lẻ & Phim Bộ)',
   resources: ['catalog', 'meta', 'stream'],
@@ -39,7 +39,7 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// 1. Catalog Handler (Hiện đủ 4 danh mục & hỗ trợ cuộn xem thêm)
+// 1. Catalog Handler (Hiện đủ 4 danh mục & cuộn vô tận)
 builder.defineCatalogHandler(async (args) => {
   let url = '';
   const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
@@ -112,21 +112,19 @@ builder.defineMetaHandler(async (args) => {
   }
 });
 
-// 3. Stream Handler (Hỗ trợ ghép link cả Phim Lẻ lẫn Phim Bộ IMDb)
+// 3. Stream Handler (Khớp link Phim Lẻ + Phim Bộ IMDb)
 builder.defineStreamHandler(async (args) => {
   let slug = '';
   let targetEpisode = null;
 
-  // Xử lý ID từ IMDb (ví dụ Phim bộ: tt1234567:1:5 hoặc Phim lẻ: tt0371746)
   if (args.id.startsWith('tt')) {
     try {
       const parts = args.id.split(':');
       const imdbId = parts[0];
       if (parts.length > 2) {
-        targetEpisode = parts[2]; // Lấy số tập
+        targetEpisode = parts[2];
       }
 
-      // Lấy tên phim từ Cinemeta
       const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${args.type}/${imdbId}.json`);
       const metaData = await metaRes.json();
       
@@ -134,7 +132,6 @@ builder.defineStreamHandler(async (args) => {
       
       const title = metaData.meta.name;
 
-      // Tìm tên phim trên KKPhim
       const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=1`);
       const searchData = await searchRes.json();
 
@@ -152,7 +149,6 @@ builder.defineStreamHandler(async (args) => {
 
   if (!slug) return { streams: [] };
 
-  // Lấy danh sách link xem phim M3U8 từ KKPhim
   try {
     const res = await fetch(`https://phimapi.com/phim/${slug}`);
     const data = await res.json();
@@ -163,9 +159,7 @@ builder.defineStreamHandler(async (args) => {
         server.server_data.forEach(ep => {
           let isMatch = true;
 
-          // Nếu là Phim Bộ (có số tập targetEpisode) -> Lọc đúng tập đó
           if (targetEpisode) {
-            // Loại bỏ chữ, chỉ lấy số từ tên tập (ví dụ "Tập 05" -> "5")
             const epNumber = ep.name.replace(/\D/g, '');
             isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`));
           }
@@ -186,5 +180,6 @@ builder.defineStreamHandler(async (args) => {
   }
 });
 
+// Chỉnh lại phần Port chuẩn cho Render
 const PORT = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port: PORT });
+serveHTTP(builder.getInterface(), { port: PORT, host: '0.0.0.0' });
