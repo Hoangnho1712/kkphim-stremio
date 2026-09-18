@@ -1,13 +1,17 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 
+// Đã tích hợp API Key TMDB của bạn
+const TMDB_API_KEY = process.env.TMDB_API_KEY || 'C018ef237ee1bff06e24516565e4723c';
+
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '3.1.4',
+  version: '3.3.1',
   name: 'KKPhim Của Tôi',
-  description: 'Tích hợp KKPhim vào Cinemeta / TMDB (Phim Lẻ & Phim Bộ)',
+  description: 'Tương thích Cinemeta, TMDB & AIOMetadata (Đã tích hợp API)',
   resources: ['catalog', 'meta', 'stream'],
-  types: ['movie', 'series'],
-  idPrefixes: ['tt', 'tmdb:', 'kkphim_'],
+  types: ['movie', 'series', 'anime'],
+  // Hỗ trợ đầy đủ IDPrefixes từ AIOMetadata
+  idPrefixes: ['tt', 'tmdb:', 'tvdb:', 'kitsu:', 'mal:', 'tvmaze:', 'kkphim_'],
   catalogs: [
     {
       type: 'movie',
@@ -38,12 +42,61 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
+// Hàm tra cứu tên phim từ các loại ID (IMDb, TMDB, TVDb)
+async function resolveTitles(type, baseId) {
+  const titles = new Set();
+  const tmdbType = type === 'movie' ? 'movie' : 'tv';
+
+  // 1. Thử lấy từ Cinemeta nếu là ID tt
+  if (baseId.startsWith('tt')) {
+    try {
+      const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${type}/${baseId}.json`);
+      const metaData = await metaRes.json();
+      if (metaData?.meta?.name) titles.add(metaData.meta.name);
+    } catch (e) {}
+  }
+
+  // 2. Tra cứu qua TMDB API để lấy tên Việt + tên gốc
+  if (TMDB_API_KEY) {
+    try {
+      let tmdbId = '';
+
+      if (baseId.startsWith('tt')) {
+        const r = await fetch(`https://api.themoviedb.org/3/find/${baseId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
+        const d = await r.json();
+        const res = tmdbType === 'tv' ? d.tv_results : d.movie_results;
+        if (res?.length > 0) tmdbId = res[0].id;
+      } else if (baseId.startsWith('tmdb:')) {
+        tmdbId = baseId.split(':')[1];
+      } else if (baseId.startsWith('tvdb:')) {
+        const tvdbId = baseId.split(':')[1];
+        const r = await fetch(`https://api.themoviedb.org/3/find/${tvdbId}?api_key=${TMDB_API_KEY}&external_source=tvdb_id`);
+        const d = await r.json();
+        const res = tmdbType === 'tv' ? d.tv_results : d.movie_results;
+        if (res?.length > 0) tmdbId = res[0].id;
+      }
+
+      if (tmdbId) {
+        // Lấy tên tiếng Việt và tiếng Anh
+        const viRes = await fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}&language=vi-VN`);
+        const viData = await viRes.json();
+        if (viData.title) titles.add(viData.title);
+        if (viData.name) titles.add(viData.name);
+        if (viData.original_title) titles.add(viData.original_title);
+        if (viData.original_name) titles.add(viData.original_name);
+      }
+    } catch (e) {}
+  }
+
+  return titles;
+}
+
 // 1. Catalog Handler
 builder.defineCatalogHandler(async (args) => {
-  let url = '';
   const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
   const limit = 24;
   const page = Math.floor(skip / limit) + 1;
+  let url = '';
 
   if (args.extra && args.extra.search) {
     const keyword = encodeURIComponent(args.extra.search);
@@ -131,78 +184,79 @@ builder.defineMetaHandler(async (args) => {
   }
 });
 
-// 3. Stream Handler (Đã vá lỗi Season thông minh)
+// 3. Stream Handler (Hỗ trợ AIOMetadata & Nhiều nguồn ID)
 builder.defineStreamHandler(async (args) => {
   let slug = '';
   let targetSeason = null;
-  let targetEpisode = null;      
-  let targetEpisodeSlug = null;  
+  let targetEpisode = null;
+  let targetEpisodeSlug = null;
 
-  if (args.id.startsWith('tt') || args.id.startsWith('tmdb:')) {
+  if (args.id.startsWith('kkphim_')) {
+    const parts = args.id.split(':');
+    slug = parts[0].replace('kkphim_', '');
+    if (parts.length > 1) targetEpisodeSlug = parts[1];
+  } else {
     try {
       const parts = args.id.split(':');
-      let metaId = '';
-      
+      let baseId = '';
+
+      // Tách baseId, season, episode tùy theo tiền tố ID
       if (args.id.startsWith('tt')) {
-        metaId = parts[0]; 
+        baseId = parts[0];
         if (parts.length > 2) {
-          targetSeason = parseInt(parts[1]); // Lấy Mùa (Season)
-          targetEpisode = parseInt(parts[2]); // Lấy Tập
+          targetSeason = parseInt(parts[1]);
+          targetEpisode = parseInt(parts[2]);
         }
-      } 
-      else if (args.id.startsWith('tmdb:')) {
-        metaId = `${parts[0]}:${parts[1]}`; 
+      } else {
+        // Định dạng kiểu tmdb:12345:1:2 hoặc tvdb:12345:1:2
+        baseId = `${parts[0]}:${parts[1]}`;
         if (parts.length > 3) {
-          targetSeason = parseInt(parts[2]); // Lấy Mùa (Season)
-          targetEpisode = parseInt(parts[3]); // Lấy Tập
+          targetSeason = parseInt(parts[2]);
+          targetEpisode = parseInt(parts[3]);
         }
       }
 
-      const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${args.type}/${metaId}.json`);
-      const metaData = await metaRes.json();
-      
-      if (!metaData || !metaData.meta || !metaData.meta.name) return { streams: [] };
-      const title = metaData.meta.name;
+      const queryTitles = await resolveTitles(args.type, baseId);
 
-      // Tìm kiếm trên API với limit lớn hơn để lấy đủ các Season
-      const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=24`);
-      const searchData = await searchRes.json();
+      let candidates = [];
+      for (const title of queryTitles) {
+        if (!title) continue;
+        const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=24`);
+        const searchData = await searchRes.json();
+        const items = searchData.data ? searchData.data.items : (searchData.items || []);
 
-      if (searchData.data && searchData.data.items && searchData.data.items.length > 0) {
-        const items = searchData.data.items;
-        let matchedItem = items[0]; // Mặc định là phần 1 (kết quả đầu)
+        if (items.length > 0) {
+          candidates = items;
+          break;
+        }
+      }
 
-        // THUẬT TOÁN TÌM ĐÚNG SEASON NẾU CÓ TRÊN KKPHIM
+      if (candidates.length > 0) {
+        let matched = candidates[0];
+
+        // Tìm đúng season
         if (targetSeason && targetSeason > 1) {
-          const sRegex1 = new RegExp(`phần ${targetSeason}`, 'i');
-          const sRegex2 = new RegExp(`season ${targetSeason}`, 'i');
-          const sRegex3 = new RegExp(`phần 0${targetSeason}`, 'i');
+          const s1 = new RegExp(`phần ${targetSeason}`, 'i');
+          const s2 = new RegExp(`season ${targetSeason}`, 'i');
+          const s3 = new RegExp(`phần 0${targetSeason}`, 'i');
+          const s4 = new RegExp(`p${targetSeason}`, 'i');
 
-          const foundMatch = items.find(item => {
-            const name = item.name || '';
-            const origin = item.origin_name || '';
-            return sRegex1.test(name) || sRegex2.test(name) || sRegex3.test(name) ||
-                   sRegex1.test(origin) || sRegex2.test(origin) || sRegex3.test(origin);
+          const found = candidates.find(item => {
+            const n = item.name || '';
+            const o = item.origin_name || '';
+            return s1.test(n) || s2.test(n) || s3.test(n) || s4.test(n) ||
+                   s1.test(o) || s2.test(o) || s3.test(o) || s4.test(o);
           });
 
-          if (foundMatch) {
-            matchedItem = foundMatch; // Thay thế bằng đúng Season tìm được
-          }
+          if (found) matched = found;
         }
-        
-        slug = matchedItem.slug;
+
+        slug = matched.slug;
       } else {
-        return { streams: [] }; 
+        return { streams: [] };
       }
     } catch (e) {
       return { streams: [] };
-    }
-  } 
-  else if (args.id.startsWith('kkphim_')) {
-    const parts = args.id.split(':');
-    slug = parts[0].replace('kkphim_', '');
-    if (parts.length > 1) {
-      targetEpisodeSlug = parts[1]; 
     }
   }
 
@@ -216,18 +270,16 @@ builder.defineStreamHandler(async (args) => {
     if (data.episodes) {
       data.episodes.forEach(server => {
         server.server_data.forEach(ep => {
-          let isMatch = true; 
+          let isMatch = true;
 
-          // Lọc chính xác tập phim (So sánh giá trị số)
           if (targetEpisode) {
-            const epMatch = ep.name.match(/\d+/); 
+            const epMatch = ep.name.match(/\d+/);
             const epNumber = epMatch ? parseInt(epMatch[0]) : null;
-            
-            isMatch = (epNumber === targetEpisode || 
-                       ep.slug === `tap-${targetEpisode}` || 
+
+            isMatch = (epNumber === targetEpisode ||
+                       ep.slug === `tap-${targetEpisode}` ||
                        ep.slug === `tap-0${targetEpisode}`);
-          } 
-          else if (targetEpisodeSlug) {
+          } else if (targetEpisodeSlug) {
             isMatch = (ep.slug === targetEpisodeSlug);
           }
 
