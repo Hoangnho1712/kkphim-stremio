@@ -1,9 +1,10 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-const fetch = require('node-fetch');
+// Nếu bạn dùng Node.js v18 trở lên trên Render, có thể XÓA dòng dưới vì Node đã hỗ trợ fetch mặc định
+// const fetch = require('node-fetch'); 
 
 const manifest = {
   id: 'org.kkphim.stremio.myaddon',
-  version: '3.1.1',
+  version: '3.1.2',
   name: 'KKPhim Của Tôi',
   description: 'Tích hợp KKPhim vào Cinemeta / TMDB (Phim Lẻ & Phim Bộ)',
   resources: ['catalog', 'meta', 'stream'],
@@ -39,7 +40,7 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// 1. Catalog Handler (Hiện đủ 4 danh mục & cuộn vô tận)
+// 1. Catalog Handler
 builder.defineCatalogHandler(async (args) => {
   let url = '';
   const skip = (args.extra && args.extra.skip) ? parseInt(args.extra.skip) : 0;
@@ -72,7 +73,7 @@ builder.defineCatalogHandler(async (args) => {
       }
       return {
         id: `kkphim_${m.slug}`,
-        type: args.type,
+        type: args.type, 
         name: m.name,
         poster: posterUrl,
         description: `Tên gốc: ${m.origin_name} (${m.year})`
@@ -85,53 +86,80 @@ builder.defineCatalogHandler(async (args) => {
   }
 });
 
-// 2. Meta Handler
+// 2. Meta Handler (ĐÃ SỬA: Thêm videos cho phim bộ)
 builder.defineMetaHandler(async (args) => {
-  if (!args.id.startsWith('kkphim_')) return { meta: {} };
+  if (!args.id.startsWith('kkphim_')) return { meta: null };
   
-  const slug = args.id.replace('kkphim_', '');
+  // Xử lý trường hợp ID truyền vào có dính tập phim (vd: kkphim_slug:tap-1)
+  const slug = args.id.split(':')[0].replace('kkphim_', '');
+  
   try {
     const res = await fetch(`https://phimapi.com/phim/${slug}`);
     const data = await res.json();
     const movie = data.movie;
+    const isSeries = movie.type !== 'single';
 
-    return {
-      meta: {
-        id: args.id,
-        type: movie.type === 'single' ? 'movie' : 'series',
-        name: movie.name,
-        poster: movie.poster_url,
-        background: movie.thumb_url,
-        description: movie.content ? movie.content.replace(/<[^>]*>/g, '') : '',
-        year: parseInt(movie.year) || undefined,
-        genres: movie.category ? movie.category.map(c => c.name) : []
-      }
+    let meta = {
+      id: args.id.split(':')[0], // Chỉ giữ lại phần kkphim_slug
+      type: isSeries ? 'series' : 'movie',
+      name: movie.name,
+      poster: movie.poster_url,
+      background: movie.thumb_url,
+      description: movie.content ? movie.content.replace(/<[^>]*>/g, '') : '',
+      year: parseInt(movie.year) || undefined,
+      genres: movie.category ? movie.category.map(c => c.name) : []
     };
+
+    // NẾU LÀ PHIM BỘ: Phải build danh sách tập (videos)
+    if (isSeries && data.episodes) {
+      meta.videos = [];
+      data.episodes.forEach(server => {
+        server.server_data.forEach(ep => {
+          // Lọc số từ tên tập (VD: "Tập 1" -> 1)
+          const epNumber = parseInt(ep.name.replace(/\D/g, '')) || 1;
+          
+          // Kiểm tra xem tập này đã add chưa (tránh trùng lặp nếu có nhiều server)
+          const videoId = `${meta.id}:${ep.slug}`;
+          if (!meta.videos.find(v => v.id === videoId)) {
+            meta.videos.push({
+              id: videoId,
+              title: ep.name,
+              season: 1, // Mặc định season 1 vì API VN thường gộp chung season
+              episode: epNumber
+            });
+          }
+        });
+      });
+    }
+
+    return { meta };
   } catch (e) {
-    return { meta: {} };
+    return { meta: null };
   }
 });
 
-// 3. Stream Handler (Khớp link Phim Lẻ + Phim Bộ IMDb)
+// 3. Stream Handler (ĐÃ SỬA: Xử lý tập phim cho cả ID kkphim_ và tt)
 builder.defineStreamHandler(async (args) => {
   let slug = '';
-  let targetEpisode = null;
+  let targetEpisode = null;      // Dành cho IMDb (số tập)
+  let targetEpisodeSlug = null;  // Dành cho ID kkphim (slug tập)
 
+  // Trường hợp 1: Phim từ Cinemeta (IMDb ID)
   if (args.id.startsWith('tt')) {
     try {
       const parts = args.id.split(':');
       const imdbId = parts[0];
       if (parts.length > 2) {
-        targetEpisode = parts[2];
+        targetEpisode = parts[2]; // Lấy số tập
       }
 
       const metaRes = await fetch(`https://v3-cinemeta.strem.io/meta/${args.type}/${imdbId}.json`);
       const metaData = await metaRes.json();
       
       if (!metaData || !metaData.meta || !metaData.meta.name) return { streams: [] };
-      
       const title = metaData.meta.name;
 
+      // Tìm trên PhimAPI bằng tên tiếng Anh
       const searchRes = await fetch(`https://phimapi.com/v1/api/tim-kiem?keyword=${encodeURIComponent(title)}&limit=1`);
       const searchData = await searchRes.json();
 
@@ -143,8 +171,14 @@ builder.defineStreamHandler(async (args) => {
     } catch (e) {
       return { streams: [] };
     }
-  } else if (args.id.startsWith('kkphim_')) {
-    slug = args.id.replace('kkphim_', '');
+  } 
+  // Trường hợp 2: Phim từ Catalog của Addon (kkphim_ ID)
+  else if (args.id.startsWith('kkphim_')) {
+    const parts = args.id.split(':');
+    slug = parts[0].replace('kkphim_', '');
+    if (parts.length > 1) {
+      targetEpisodeSlug = parts[1]; // Vd: 'tap-1'
+    }
   }
 
   if (!slug) return { streams: [] };
@@ -157,17 +191,25 @@ builder.defineStreamHandler(async (args) => {
     if (data.episodes) {
       data.episodes.forEach(server => {
         server.server_data.forEach(ep => {
-          let isMatch = true;
+          let isMatch = true; // Mặc định trả về stream (dành cho phim lẻ)
 
+          // Nếu là phim bộ từ IMDb
           if (targetEpisode) {
             const epNumber = ep.name.replace(/\D/g, '');
-            isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`));
+            isMatch = (epNumber == targetEpisode || ep.slug.endsWith(`tap-${targetEpisode}`) || ep.slug.endsWith(`tap-0${targetEpisode}`));
+          } 
+          // Nếu là phim bộ từ Catalog KKPhim
+          else if (targetEpisodeSlug) {
+            isMatch = (ep.slug === targetEpisodeSlug);
           }
 
           if (isMatch && ep.link_m3u8) {
             streams.push({
-              title: `[KKPhim] ${server.server_name} - ${ep.name}`,
-              url: ep.link_m3u8
+              title: `[KKPhim] ${server.server_name}\n${ep.name}`,
+              url: ep.link_m3u8,
+              behaviorHints: {
+                notWebReady: true // Link m3u8 thường cần player hỗ trợ HLS
+              }
             });
           }
         });
@@ -180,6 +222,5 @@ builder.defineStreamHandler(async (args) => {
   }
 });
 
-// Chỉnh lại phần Port chuẩn cho Render
 const PORT = process.env.PORT || 7000;
 serveHTTP(builder.getInterface(), { port: PORT, host: '0.0.0.0' });
