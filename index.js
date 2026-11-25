@@ -1,5 +1,4 @@
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-
+const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 // API Key TMDB của bạn (Đã tích hợp)
 const TMDB_API_KEY = process.env.TMDB_API_KEY || 'C018ef237ee1bff06e24516565e4723c';
 
@@ -324,6 +323,13 @@ builder.defineStreamHandler(async (args) => {
   }
 });
 
-const PORT = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port: PORT, host: '0.0.0.0' });
-module.exports = app;
+const router = getRouter(builder.getInterface());
+
+module.exports = (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    router(req, res, () => {
+        res.statusCode = 404;
+        res.end('Not Found');
+    });
+};
