@@ -326,3 +326,4 @@ builder.defineStreamHandler(async (args) => {
 
 const PORT = process.env.PORT || 7000;
 serveHTTP(builder.getInterface(), { port: PORT, host: '0.0.0.0' });
+module.exports = app;
